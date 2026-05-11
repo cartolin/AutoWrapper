@@ -683,5 +683,115 @@ namespace AutoWrapper.Test
 
             json.ContainsKey("responseException").ShouldBe(false);
         }
+
+        [Fact(DisplayName = "Successful_ApiResponse_CamelCase_Should_Not_Be_Double_Wrapped")]
+        public async Task Successful_ApiResponse_CamelCase_Should_Not_Be_Double_Wrapped()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false,
+                        UseCamelCaseNamingStrategy = true
+                    });
+
+                    app.Run(context =>
+                    {
+                        context.Response.ContentType = "application/json";
+
+                        var body = @"{
+                            ""statusCode"": 200,
+                            ""message"": ""Product category updated successfully."",
+                            ""isError"": null,
+                            ""result"": {
+                                ""id"": 10,
+                                ""name"": ""Beverages""
+                            }
+                        }";
+
+                        return context.Response.WriteAsync(body);
+                    });
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Put, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(200);
+
+            json["statusCode"]!.Value<int>().ShouldBe(200);
+            json["message"]!.Value<string>().ShouldBe("Product category updated successfully.");
+            json["isError"]!.Value<bool>().ShouldBe(false);
+
+            var result = (JObject)json["result"]!;
+
+            result["id"]!.Value<int>().ShouldBe(10);
+            result["name"]!.Value<string>().ShouldBe("Beverages");
+
+            result["statusCode"].ShouldBeNull();
+            result["message"].ShouldBeNull();
+            result["result"].ShouldBeNull();
+        }
+
+        [Fact(DisplayName = "Successful_ApiResponse_PascalCase_Should_Not_Be_Double_Wrapped")]
+        public async Task Successful_ApiResponse_PascalCase_Should_Not_Be_Double_Wrapped()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false,
+                        UseCamelCaseNamingStrategy = false
+                    });
+
+                    app.Run(context =>
+                    {
+                        context.Response.ContentType = "application/json";
+
+                        var body = @"{
+                            ""StatusCode"": 200,
+                            ""Message"": ""Product category updated successfully."",
+                            ""IsError"": null,
+                            ""Result"": {
+                                ""Id"": 10,
+                                ""Name"": ""Beverages""
+                            }
+                        }";
+
+                        return context.Response.WriteAsync(body);
+                    });
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Put, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(200);
+
+            json["StatusCode"]!.Value<int>().ShouldBe(200);
+            json["Message"]!.Value<string>().ShouldBe("Product category updated successfully.");
+            json["IsError"]!.Value<bool>().ShouldBe(false);
+
+            var result = (JObject)json["Result"]!;
+
+            result["Id"]!.Value<int>().ShouldBe(10);
+            result["Name"]!.Value<string>().ShouldBe("Beverages");
+
+            result["StatusCode"].ShouldBeNull();
+            result["Message"].ShouldBeNull();
+            result["Result"].ShouldBeNull();
+        }
     }
 }

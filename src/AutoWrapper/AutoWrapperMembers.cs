@@ -199,7 +199,7 @@ namespace AutoWrapper
                 {
                     if (_hasSchemaForMappping && (_propertyMappings.Count == 0 || _propertyMappings == null))
                         throw new ApiException(ResponseMessage.NoMappingFound);
-                    else if (bodyText.Contains(nameof(ApiResponse.Result)))
+                    else if (IsApiResponseObject(bodyContent))
                         apiResponse = JsonConvert.DeserializeObject<ApiResponse>(bodyText);
                     else
                         apiResponse = new ApiResponse();
@@ -297,6 +297,26 @@ namespace AutoWrapper
 
 
         #region Unification with
+        private static bool IsApiResponseObject(dynamic bodyContent)
+        {
+            var json = bodyContent as JObject;
+
+            if (json == null)
+            {
+                return false;
+            }
+
+            return HasPropertyIgnoreCase(json, nameof(ApiResponse.Message))
+                && (HasPropertyIgnoreCase(json, nameof(ApiResponse.Result)) || HasPropertyIgnoreCase(json, nameof(ApiResponse.ResponseException)) || HasPropertyIgnoreCase(json, nameof(ApiResponse.StatusCode))
+                );
+        }
+
+        private static bool HasPropertyIgnoreCase(JObject json, string propertyName)
+        {
+            return json.Properties()
+                .Any(x => string.Equals(x.Name, propertyName, StringComparison.OrdinalIgnoreCase));
+        }
+
         private ApiResponse BuildUnifiedApiErrorResponse(HttpContext context, int httpStatusCode, ApiError apiError)
         {
             var visibleStatusCode = !_options.ShowStatusCode ? 0 : httpStatusCode;
