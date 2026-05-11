@@ -1,4 +1,5 @@
-﻿using AutoWrapper.Extensions;
+﻿using AutoWrapper.Contexts;
+using AutoWrapper.Extensions;
 using AutoWrapper.Helpers;
 using AutoWrapper.Wrappers;
 using Microsoft.AspNetCore.Http;
@@ -120,7 +121,7 @@ namespace AutoWrapper
                 }
                 else
                 {
-                    exceptionMessage = ResponseMessage.Unhandled;
+                    exceptionMessage = _options.UnhandledErrorMessage;
                 }
 
                 apiError = new ApiError(exceptionMessage) { Details = stackTrace };
@@ -131,10 +132,21 @@ namespace AutoWrapper
             if (_options.EnableExceptionLogging)
             {
                 var errorMessage = apiError is ApiError ? ((ApiError)apiError).ExceptionMessage : ResponseMessage.Exception;
-                _logger.Log(LogLevel.Error, exception, $"[{httpStatusCode}]: { errorMessage }");
+                _logger.Log(LogLevel.Error, exception, $"[{httpStatusCode}]: {errorMessage}");
             }
 
-            var jsonString = ConvertToJSONString(GetErrorResponse(httpStatusCode, apiError));
+            ApiResponse response;
+
+            if (_options.ErrorOutputMode == ErrorOutputMode.Unified)
+            {
+                response = BuildUnifiedExceptionResponse(context, exception, httpStatusCode, apiError);
+            }
+            else
+            {
+                response = GetErrorResponse(context, httpStatusCode, apiError);
+            }
+
+            var jsonString = ConvertToJSONString(response);
 
             await WriteFormattedResponseToHttpContextAsync(context, httpStatusCode, jsonString);
         }
@@ -150,10 +162,19 @@ namespace AutoWrapper
             }
 
             var bodyText = IsEncoded ? JsonConvert.DeserializeObject<dynamic>(ParsedText) : body.ToString();
-            ApiError apiError = !string.IsNullOrEmpty(body.ToString()) ? new ApiError(bodyText) : WrapUnsucessfulError(httpStatusCode);
 
-            var jsonString = ConvertToJSONString(GetErrorResponse(httpStatusCode, apiError));
-            await WriteFormattedResponseToHttpContextAsync(context, httpStatusCode, jsonString);
+            if (_options.ErrorOutputMode == ErrorOutputMode.Legacy)
+            {
+                ApiError apiError = !string.IsNullOrEmpty(body.ToString()) ? new ApiError(bodyText) : WrapUnsucessfulError(httpStatusCode);
+
+                var jsonString = ConvertToJSONString(GetErrorResponse(context, httpStatusCode, apiError));
+                await WriteFormattedResponseToHttpContextAsync(context, httpStatusCode, jsonString);
+                return;
+            }
+
+            var response = BuildUnifiedControlledErrorResponse(context, bodyText, httpStatusCode);
+            var unifiedJsonString = ConvertToJSONString(response);
+            await WriteFormattedResponseToHttpContextAsync(context, httpStatusCode, unifiedJsonString);
         }
 
         public async Task HandleSuccessfulRequestAsync(HttpContext context, object body, int httpStatusCode)
@@ -274,6 +295,237 @@ namespace AutoWrapper
             return (statusCode >= 200 && statusCode < 400);
         }
 
+
+        #region Unification with
+        private ApiResponse BuildUnifiedApiErrorResponse(HttpContext context, int httpStatusCode, ApiError apiError)
+        {
+            var visibleStatusCode = !_options.ShowStatusCode ? 0 : httpStatusCode;
+
+            if (apiError.ValidationErrors != null && apiError.ValidationErrors.Any())
+            {
+                var errors = BuildValidationErrors(context, httpStatusCode, apiError.ValidationErrors);
+                return ApiResponse.Error(visibleStatusCode, _options.ValidationErrorMessage, errors, GetApiVersion());
+            }
+
+            var message = apiError.ExceptionMessage?.ToString() ?? WrapUnsucessfulError(httpStatusCode).ExceptionMessage?.ToString();
+
+            var errorsObject = BuildReferenceErrorObject(apiError);
+
+            return ApiResponse.Error(visibleStatusCode, message, errorsObject, GetApiVersion());
+        }
+
+        private ApiResponse BuildUnifiedCustomErrorObjectResponse(HttpContext context, int httpStatusCode, object customError)
+        {
+            var visibleStatusCode = !_options.ShowStatusCode ? 0 : httpStatusCode;
+
+            var parsed = ParseControlledErrorBody(customError, httpStatusCode);
+
+            return ApiResponse.Error(visibleStatusCode, parsed.Message, parsed.Errors, GetApiVersion());
+        }
+
+        private ApiResponse BuildUnifiedControlledErrorResponse(HttpContext context, object body, int httpStatusCode)
+        {
+            var parsed = ParseControlledErrorBody(body, httpStatusCode);
+
+            var controlledContext = new ControlledErrorContext
+            {
+                HttpContext = context,
+                StatusCode = httpStatusCode,
+                Body = body,
+                Message = parsed.Message,
+                Errors = parsed.Errors,
+                ApiError = null
+            };
+
+            if (_options.ControlledErrorResponseFactory != null)
+            {
+                return _options.ControlledErrorResponseFactory(controlledContext);
+            }
+
+            return ApiResponse.Error(!_options.ShowStatusCode ? 0 : httpStatusCode, parsed.Message, parsed.Errors, GetApiVersion());
+        }
+
+        private ApiResponse BuildUnifiedExceptionResponse(HttpContext context, System.Exception exception, int httpStatusCode, object apiError)
+        {
+            ApiResponse response;
+
+            if (apiError is ApiError error)
+            {
+                response = BuildUnifiedApiErrorResponse(context, httpStatusCode, error);
+            }
+            else
+            {
+                response = BuildUnifiedCustomErrorObjectResponse(context, httpStatusCode, apiError);
+            }
+
+            if (_options.ExceptionResponseFactory == null)
+            {
+                return response;
+            }
+
+            var exceptionContext = new ExceptionErrorContext
+            {
+                HttpContext = context,
+                Exception = exception,
+                StatusCode = httpStatusCode,
+                Message = response.Message,
+                Errors = response.Errors,
+                ApiError = apiError as ApiError
+            };
+
+            return _options.ExceptionResponseFactory(exceptionContext);
+        }
+
+        private object BuildValidationErrors(HttpContext context, int httpStatusCode, IEnumerable<ValidationError> validationErrors)
+        {
+            if (_options.ValidationErrorsFactory != null)
+            {
+                return _options.ValidationErrorsFactory(new ValidationErrorContext
+                {
+                    HttpContext = context,
+                    StatusCode = httpStatusCode,
+                    ValidationErrors = validationErrors
+                });
+            }
+
+            // Conservative default
+            return validationErrors;
+        }
+
+        private object BuildReferenceErrorObject(ApiError apiError)
+        {
+            if (string.IsNullOrEmpty(apiError.ReferenceErrorCode) && string.IsNullOrEmpty(apiError.ReferenceDocumentLink))
+            {
+                return null;
+            }
+
+            return new { code = apiError.ReferenceErrorCode, link = apiError.ReferenceDocumentLink };
+        }
+
+        private (string Message, object Errors) ParseControlledErrorBody(object body, int httpStatusCode)
+        {
+            if (body == null)
+            {
+                return (WrapUnsucessfulError(httpStatusCode).ExceptionMessage?.ToString(), null);
+            }
+
+            var raw = body.ToString();
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return (WrapUnsucessfulError(httpStatusCode).ExceptionMessage?.ToString(), null);
+            }
+
+            raw = raw.Trim();
+
+            if (!raw.IsValidJson())
+            {
+                return (raw.Trim('"'), null);
+            }
+
+            try
+            {
+                var token = JToken.Parse(raw);
+
+                if (token.Type == JTokenType.String)
+                {
+                    return (token.Value<string>(), null);
+                }
+
+                if (token is JObject obj)
+                {
+                    var validationErrors = TryBuildValidationErrorsFromJObject(obj, httpStatusCode);
+
+                    if (validationErrors != null)
+                    {
+                        return (_options.ValidationErrorMessage, validationErrors);
+                    }
+
+                    var message =
+                        obj.Value<string>("message") ??
+                        obj.Value<string>("detail") ??
+                        obj.Value<string>("title") ??
+                        obj.Value<string>("error") ??
+                        WrapUnsucessfulError(httpStatusCode).ExceptionMessage?.ToString();
+
+                    var errors = ExtractErrorsObject(obj);
+
+                    return (message, errors);
+                }
+
+                return (raw, null);
+            }
+            catch
+            {
+                return (raw.Trim('"'), null);
+            }
+        }
+
+        private object TryBuildValidationErrorsFromJObject(JObject obj, int httpStatusCode)
+        {
+            var errorsToken = obj["errors"];
+
+            if (errorsToken == null)
+            {
+                return null;
+            }
+
+            // If there is no factory, we keep the errors object as it came.
+            if (_options.ValidationErrorsFactory == null)
+            {
+                return errorsToken;
+            }
+
+            var validationErrors = new List<ValidationError>();
+
+            if (errorsToken is JObject errorsObject)
+            {
+                foreach (var property in errorsObject.Properties())
+                {
+                    if (property.Value is JArray messages)
+                    {
+                        foreach (var message in messages)
+                        {
+                            validationErrors.Add(new ValidationError(property.Name, message.ToString()));
+                        }
+                    }
+                    else
+                    {
+                        validationErrors.Add(new ValidationError(property.Name, property.Value.ToString()));
+                    }
+                }
+            }
+
+            if (!validationErrors.Any())
+            {
+                return errorsToken;
+            }
+
+            return _options.ValidationErrorsFactory(new ValidationErrorContext
+            {
+                HttpContext = null,
+                StatusCode = httpStatusCode,
+                ValidationErrors = validationErrors
+            });
+        }
+
+        private object ExtractErrorsObject(JObject obj)
+        {
+            var clone = new JObject(obj);
+
+            clone.Remove("message");
+            clone.Remove("detail");
+            clone.Remove("title");
+            clone.Remove("error");
+
+            clone.Remove("status");
+            clone.Remove("type");
+            clone.Remove("instance");
+
+            return clone.HasValues ? clone : null;
+        }
+        #endregion
+
         #region Private Members
 
         private async Task WriteFormattedResponseToHttpContextAsync(HttpContext context, int httpStatusCode, string jsonString)
@@ -300,7 +552,17 @@ namespace AutoWrapper
 
         private bool? SetIsErrorValue(bool? isError)
         {
-            return isError.HasValue ? true : _options.ShowIsErrorFlagForSuccessfulResponse ? false : (bool?)null;
+            if (isError == true)
+            {
+                return true;
+            }
+
+            if (isError == false)
+            {
+                return _options.ShowIsErrorFlagForSuccessfulResponse ? false : (bool?)null;
+            }
+
+            return _options.ShowIsErrorFlagForSuccessfulResponse ? false : (bool?)null;
         }
 
         private string ConvertToJSONString(ApiError apiError) => JsonConvert.SerializeObject(apiError, _jsonSettings);
@@ -321,8 +583,20 @@ namespace AutoWrapper
             };
 
 
-        private ApiResponse GetErrorResponse(int httpStatusCode, object apiError)
-            => new ApiResponse(!_options.ShowStatusCode ? 0 : httpStatusCode, apiError) { Version = GetApiVersion() };
+        private ApiResponse GetErrorResponse(HttpContext context, int httpStatusCode, object apiError)
+        {
+            if (_options.ErrorOutputMode == ErrorOutputMode.Legacy)
+            {
+                return new ApiResponse(!_options.ShowStatusCode ? 0 : httpStatusCode, apiError) { Version = GetApiVersion() };
+            }
+
+            if (apiError is ApiError error)
+            {
+                return BuildUnifiedApiErrorResponse(context, httpStatusCode, error);
+            }
+
+            return BuildUnifiedCustomErrorObjectResponse(context, httpStatusCode, apiError);
+        }
 
         private ApiResponse GetSucessResponse(ApiResponse apiResponse, string httpMethod)
         {

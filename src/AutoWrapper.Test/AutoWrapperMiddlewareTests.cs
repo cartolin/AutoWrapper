@@ -10,8 +10,10 @@ using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json.Linq;
 using Shouldly;
 using System;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using Xunit;
@@ -290,5 +292,352 @@ namespace AutoWrapper.Test
             str.ShouldBe(content);
         }
 
+        // Unified error output mode tests
+
+        [Fact(DisplayName = "Unified_NotFound_String_Should_Use_Message_And_No_ResponseException")]
+        public async Task Unified_NotFound_String_Should_Use_Message_And_No_ResponseException()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Unified,
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false
+                    });
+
+                    app.Run(context =>
+                    {
+                        context.Response.StatusCode = StatusCodes.Status404NotFound;
+                        return context.Response.WriteAsync("Category not found.");
+                    });
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(404);
+            json["statusCode"]!.Value<int>().ShouldBe(404);
+            json["isError"]!.Value<bool>().ShouldBe(true);
+            json["message"]!.Value<string>().ShouldBe("Category not found.");
+            json["result"]!.Type.ShouldBe(JTokenType.Null);
+            json["errors"]!.Type.ShouldBe(JTokenType.Null);
+            json.ContainsKey("responseException").ShouldBe(false);
+        }
+
+        [Fact(DisplayName = "Unified_ApiException_Should_Use_Message_And_No_ResponseException")]
+        public async Task Unified_ApiException_Should_Use_Message_And_No_ResponseException()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Unified,
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false
+                    });
+
+                    app.Run(context => throw new ApiException("does not exist.", 404));
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(404);
+            json["statusCode"]!.Value<int>().ShouldBe(404);
+            json["isError"]!.Value<bool>().ShouldBe(true);
+            json["message"]!.Value<string>().ShouldBe("does not exist.");
+            json["result"]!.Type.ShouldBe(JTokenType.Null);
+            json["errors"]!.Type.ShouldBe(JTokenType.Null);
+            json.ContainsKey("responseException").ShouldBe(false);
+        }
+
+        [Fact(DisplayName = "Unified_Validation_Should_Move_ValidationErrors_To_Errors")]
+        public async Task Unified_Validation_Should_Move_ValidationErrors_To_Errors()
+        {
+            var validationErrors = new[] {
+                new ValidationError("LastName", "'Last Name' must not be empty."),
+                new ValidationError("FirstName", "'First Name' must not be empty.")
+            };
+
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Unified,
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false
+                    });
+
+                    app.Run(context => throw new ApiException(validationErrors));
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+            var errors = (JArray)json["errors"]!;
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(400);
+            json["statusCode"]!.Value<int>().ShouldBe(400);
+            json["isError"]!.Value<bool>().ShouldBe(true);
+            json["message"]!.Value<string>().ShouldBe("Request responded with one or more validation errors.");
+            json["result"]!.Type.ShouldBe(JTokenType.Null);
+
+            errors.Count.ShouldBe(2);
+            errors[0]["name"]!.Value<string>().ShouldBe("LastName");
+            errors[0]["reason"]!.Value<string>().ShouldBe("'Last Name' must not be empty.");
+            errors[0]["code"].ShouldBeNull();
+
+            json.ContainsKey("responseException").ShouldBe(false);
+        }
+
+        [Fact(DisplayName = "Unified_Validation_CustomFactory_Should_Allow_Code_Optional")]
+        public async Task Unified_Validation_CustomFactory_Should_Allow_Code_Optional()
+        {
+            var validationErrors = new[]
+                    {
+                new ValidationError("LastName", "'Last Name' must not be empty.")
+            };
+
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Unified,
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false,
+                        ValidationErrorMessage = "The request contains validation errors.",
+                        ValidationErrorsFactory = ctx =>
+                            ctx.ValidationErrors.Select(x => new
+                            {
+                                field = x.Name,
+                                message = x.Reason,
+                                code = (string)null
+                            }).ToList()
+                    });
+
+                    app.Run(context => throw new ApiException(validationErrors));
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+            var errors = (JArray)json["errors"]!;
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(400);
+            json["statusCode"]!.Value<int>().ShouldBe(400);
+            json["message"]!.Value<string>().ShouldBe("The request contains validation errors.");
+            errors.Count.ShouldBe(1);
+
+            errors[0]["field"]!.Value<string>().ShouldBe("LastName");
+            errors[0]["message"]!.Value<string>().ShouldBe("'Last Name' must not be empty.");
+            errors[0]["code"]!.Type.ShouldBe(JTokenType.Null);
+
+            json.ContainsKey("responseException").ShouldBe(false);
+        }
+
+        [Fact(DisplayName = "Unified_Conflict_Object_Should_Extract_Message_And_Move_Rest_To_Errors")]
+        public async Task Unified_Conflict_Object_Should_Extract_Message_And_Move_Rest_To_Errors()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Unified,
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false
+                    });
+
+                    app.Run(context =>
+                    {
+                        context.Response.StatusCode = StatusCodes.Status409Conflict;
+                        context.Response.ContentType = "application/json";
+
+                        return context.Response.WriteAsync(new
+                        {
+                            message = "Category already exists.",
+                            code = "Category.Duplicate"
+                        }.ToJson());
+                    });
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(409);
+            json["statusCode"]!.Value<int>().ShouldBe(409);
+            json["isError"]!.Value<bool>().ShouldBe(true);
+            json["message"]!.Value<string>().ShouldBe("Category already exists.");
+            json["result"]!.Type.ShouldBe(JTokenType.Null);
+            json["errors"]!["code"]!.Value<string>().ShouldBe("Category.Duplicate");
+            json.ContainsKey("responseException").ShouldBe(false);
+        }
+
+        [Fact(DisplayName = "Legacy_Should_Keep_ResponseException")]
+        public async Task Legacy_Should_Keep_ResponseException()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Legacy,
+                        ShowStatusCode = true,
+                        IgnoreNullValue = false
+                    });
+
+                    app.Run(context => throw new ApiException("does not exist.", 404));
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(404);
+            json["statusCode"]!.Value<int>().ShouldBe(404);
+            json["isError"]!.Value<bool>().ShouldBe(true);
+            json.ContainsKey("responseException").ShouldBe(true);
+            json["responseException"]!["exceptionMessage"]!.Value<string>().ShouldBe("does not exist.");
+        }
+
+        [Fact(DisplayName = "IsError_False_Should_Not_Be_Forced_To_True")]
+        public async Task IsError_False_Should_Not_Be_Forced_To_True()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false
+                    });
+
+                    app.Run(context => context.Response.WriteAsync("OK"));
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(200);
+            json["statusCode"]!.Value<int>().ShouldBe(200);
+            json["isError"]!.Value<bool>().ShouldBe(false);
+            json["message"]!.Value<string>().ShouldBe("GET Request successful.");
+        }
+
+        [Fact(DisplayName = "Unified_UnhandledException_Should_Not_Expose_Internal_Details_When_IsDebug_False")]
+        public async Task Unified_UnhandledException_Should_Not_Expose_Internal_Details_When_IsDebug_False()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Unified,
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false,
+                        IsDebug = false
+                    });
+
+                    app.Run(context => throw new InvalidOperationException("Sensitive database connection failed."));
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(500);
+            json["statusCode"]!.Value<int>().ShouldBe(500);
+            json["isError"]!.Value<bool>().ShouldBe(true);
+
+            json["message"]!.Value<string>().ShouldBe("Unhandled Exception occurred. Unable to process the request.");
+            json["result"]!.Type.ShouldBe(JTokenType.Null);
+            json["errors"]!.Type.ShouldBe(JTokenType.Null);
+
+            content.ShouldNotContain("Sensitive database connection failed.");
+            content.ShouldNotContain("InvalidOperationException");
+            content.ShouldNotContain("StackTrace");
+            json.ContainsKey("responseException").ShouldBe(false);
+        }
+
+        [Fact(DisplayName = "Unified_ExceptionResponseFactory_Should_Customize_Exception_Output")]
+        public async Task Unified_ExceptionResponseFactory_Should_Customize_Exception_Output()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Unified,
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false,
+
+                        ExceptionResponseFactory = ctx => ApiResponse.Error(
+                            statusCode: ctx.StatusCode,
+                            message: "Custom exception response.",
+                            errors: new
+                            {
+                                type = ctx.Exception.GetType().Name
+                            })
+                    });
+
+                    app.Run(context => throw new InvalidOperationException("Internal failure."));
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(500);
+            json["statusCode"]!.Value<int>().ShouldBe(500);
+            json["isError"]!.Value<bool>().ShouldBe(true);
+            json["message"]!.Value<string>().ShouldBe("Custom exception response.");
+            json["result"]!.Type.ShouldBe(JTokenType.Null);
+            json["errors"]!["type"]!.Value<string>().ShouldBe("InvalidOperationException");
+            json.ContainsKey("responseException").ShouldBe(false);
+        }
     }
 }

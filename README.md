@@ -20,6 +20,8 @@ Language: English | [中文](README.zh-cn.md)
 * A configurable middleware `options` to configure the wrapper. See **Options** section below for details.
 * Enable property name mappings for the default `ApiResponse` properties.
 * Add support for implementing your own user-defined `Response` and `Error` schema / object.
+* Add optional unified error output mode for APIs that prefer exposing controlled errors through `message`, `result`, and `errors` while preserving the original `responseException` schema by default.
+* Add configurable factories for controlled error responses, exception responses, and validation error output.
 * Add support for Problem Details exception format.
 * Add support for ignoring action methods that don't need to be wrapped using `[AutoWrapIgnore]` filter attribute.
 * V3.x enable backwards compatibility support for `netcoreapp2.1` and `netcoreapp2.2` .NET Core frameworks.
@@ -109,13 +111,15 @@ Running the code will give you the following result when successful:
     "result": 100
 }
 ```
-The `ApiResponse` object has the following overload constructors that you can use:
+
+The `ApiResponse` object has the following overload constructors and helpers that you can use:
 
 ```csharp
 ApiResponse(string message, object result = null, int statusCode = 200, string apiVersion = "1.0.0.0")
 ApiResponse(object result, int statusCode = 200)
 ApiResponse(int statusCode, object apiError)
 ApiResponse()
+ApiResponse.Error(int statusCode, string message, object errors = null, string apiVersion = null)
 ```
 
 # Defining Your Own Api Exception
@@ -159,6 +163,80 @@ The format of the exception result would look something like this when validatio
     }
 }
 ```
+
+## Validation errors in Unified mode
+
+In `Unified` mode, validation errors keep the original AutoWrapper validation shape by default.
+
+```csharp
+if (!ModelState.IsValid)
+{
+    throw new ApiException(ModelState.AllErrors());
+}
+```
+
+will produce:
+
+```json
+{
+    "statusCode": 400,
+    "isError": true,
+    "message": "Request responded with one or more validation errors.",
+    "result": null,
+    "errors": [
+        {
+            "name": "LastName",
+            "reason": "'Last Name' must not be empty."
+        },
+        {
+            "name": "FirstName",
+            "reason": "'First Name' must not be empty."
+        }
+    ]
+}
+```
+
+The default validation error schema remains `{ name, reason }`.
+
+If your application needs a different validation shape, use `ValidationErrorsFactory`:
+
+```csharp
+app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+{
+    ErrorOutputMode = ErrorOutputMode.Unified,
+    ShowStatusCode = true,
+
+    ValidationErrorMessage = "The request contains validation errors.",
+
+    ValidationErrorsFactory = ctx =>
+        ctx.ValidationErrors.Select(x => new
+        {
+            field = x.Name,
+            message = x.Reason,
+            code = (string)null
+        }).ToList()
+});
+```
+
+Example output:
+
+```json
+{
+    "statusCode": 400,
+    "isError": true,
+    "message": "The request contains validation errors.",
+    "result": null,
+    "errors": [
+        {
+            "field": "LastName",
+            "message": "'Last Name' must not be empty.",
+            "code": null
+        }
+    ]
+}
+```
+
+The `code` field is not required by AutoWrapper. It is application-defined and can be omitted.
 
 To use Problem Details as an error format, just set `UseApiProblemDetailsException` to `true`:
 
@@ -224,6 +302,113 @@ The result would look something like this:
     }
 }
 ```
+
+# Optional Unified Error Output Mode
+
+By default, AutoWrapper keeps the original error response schema using `responseException`.
+
+```json
+{
+    "isError": true,
+    "responseException": {
+        "exceptionMessage": "Record with id: 1001 does not exist."
+    }
+}
+```
+
+You can optionally enable a unified error output mode:
+
+```csharp
+app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+{
+    ErrorOutputMode = ErrorOutputMode.Unified,
+    ShowStatusCode = true,
+    ShowIsErrorFlagForSuccessfulResponse = true
+});
+```
+
+This mode keeps the middleware behavior but exposes controlled errors using the main response envelope:
+
+```json
+{
+    "statusCode": 404,
+    "isError": true,
+    "message": "Record with id: 1001 does not exist.",
+    "result": null,
+    "errors": null
+}
+```
+
+For example:
+
+```csharp
+throw new ApiException($"Record with id: {id} does not exist.", Status404NotFound);
+```
+
+will produce:
+
+```json
+{
+    "statusCode": 404,
+    "isError": true,
+    "message": "Record with id: 1001 does not exist.",
+    "result": null,
+    "errors": null
+}
+```
+
+A controlled HTTP response such as:
+
+```csharp
+return NotFound("Record not found.");
+```
+
+will produce:
+
+```json
+{
+    "statusCode": 404,
+    "isError": true,
+    "message": "Record not found.",
+    "result": null,
+    "errors": null
+}
+```
+
+An object response such as:
+
+```csharp
+return Conflict(new
+{
+    message = "Category already exists.",
+    code = "Category.Duplicate"
+});
+```
+
+will produce:
+
+```json
+{
+    "statusCode": 409,
+    "isError": true,
+    "message": "Category already exists.",
+    "result": null,
+    "errors": {
+        "code": "Category.Duplicate"
+    }
+}
+```
+
+The `Legacy` mode remains the default behavior:
+
+```csharp
+app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+{
+    ErrorOutputMode = ErrorOutputMode.Legacy
+});
+```
+
+This keeps backward compatibility with the original `responseException` schema.
 
 An example using `ApiProblemDetailsException`:
 
@@ -396,6 +581,60 @@ The format of the output will now look like this:
     }
 }
 ```
+
+## Customizing Unified error responses
+
+The `Using Your Own Error Schema` section customizes the object exposed through `responseException`.
+
+When `ErrorOutputMode.Unified` is enabled, error output can be customized through factories.
+
+### Controlled HTTP errors
+
+```csharp
+app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+{
+    ErrorOutputMode = ErrorOutputMode.Unified,
+
+    ControlledErrorResponseFactory = ctx => ApiResponse.Error(
+        statusCode: ctx.StatusCode,
+        message: ctx.Message,
+        errors: ctx.Errors)
+});
+```
+
+### Exception errors
+
+```csharp
+app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+{
+    ErrorOutputMode = ErrorOutputMode.Unified,
+
+    ExceptionResponseFactory = ctx => ApiResponse.Error(
+        statusCode: ctx.StatusCode,
+        message: ctx.Message,
+        errors: new
+        {
+            exceptionType = ctx.Exception.GetType().Name
+        })
+});
+```
+
+### Validation errors
+
+```csharp
+app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+{
+    ErrorOutputMode = ErrorOutputMode.Unified,
+
+    ValidationErrorsFactory = ctx =>
+        ctx.ValidationErrors.Select(x => new
+        {
+            name = x.Name,
+            reason = x.Reason
+        }).ToList()
+});
+```
+
 # Using Your Own API Response Schema
 If mapping wont work for you and you need to add additional attributes to the default `API` response schema, then you can use your own custom schema/model to achieve that by setting the `UseCustomSchema` to true in `AutoWrapperOptions` as shown in the following code below:
 
@@ -512,6 +751,61 @@ That’s it. One thing to note here is that once you use your own schema for you
 
 # Options
 The following properties are the available options that you can set:
+
+### Unified error output additions
+
+* `ErrorOutputMode`
+* `ControlledErrorResponseFactory`
+* `ExceptionResponseFactory`
+* `ValidationErrorsFactory`
+* `ValidationErrorMessage`
+* `UnhandledErrorMessage`
+
+#### ErrorOutputMode
+
+Controls how errors are exposed in the public API response.
+
+```csharp
+public enum ErrorOutputMode
+{
+    Legacy = 0,
+    Unified = 1
+}
+```
+
+`Legacy` preserves the original AutoWrapper behavior using `responseException`. This is the default mode.
+
+`Unified` exposes errors through the main response envelope:
+
+```json
+{
+    "statusCode": 400,
+    "isError": true,
+    "message": "...",
+    "result": null,
+    "errors": null
+}
+```
+
+#### ControlledErrorResponseFactory
+
+Allows customizing controlled HTTP error responses such as `BadRequest`, `NotFound`, `Conflict`, `Unauthorized`, `Forbidden`, etc.
+
+#### ExceptionResponseFactory
+
+Allows customizing exception responses generated from `ApiException` or unexpected exceptions.
+
+#### ValidationErrorsFactory
+
+Allows customizing the object assigned to `errors` when validation errors are detected.
+
+#### ValidationErrorMessage
+
+Default message used when validation errors are detected in `Unified` mode.
+
+#### UnhandledErrorMessage
+
+Default message used for unexpected exceptions when `IsDebug` is `false`.
 
 ### Version 4.5.x Additions
 * `ExcludePaths`
@@ -757,6 +1051,45 @@ public async Task<IEnumerable<PersonDTO>> Get()
 ```
 
 For more information, see: [AutoWrapper.Server](https://github.com/proudmonkey/AutoWrapper.Server)
+
+# Backward Compatibility
+
+This enhancement keeps the original AutoWrapper behavior by default.
+
+```csharp
+app.UseApiResponseAndExceptionWrapper();
+```
+
+is equivalent to:
+
+```csharp
+app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+{
+    ErrorOutputMode = ErrorOutputMode.Legacy
+});
+```
+
+This means existing applications can continue using the original `responseException` schema without changes.
+
+To use the new error envelope, enable:
+
+```csharp
+ErrorOutputMode = ErrorOutputMode.Unified
+```
+
+The following features continue to work as before:
+
+* `ApiException`
+* `ApiProblemDetailsException`
+* `UseCustomSchema`
+* `UseCustomExceptionFormat`
+* `AutoWrapperPropertyMap`
+* `AutoWrapIgnore`
+* `RequestDataLogIgnore`
+* `SwaggerPath`
+* `ExcludePaths`
+* request, response and exception logging
+
 # Samples
 * [AutoWrapper: Prettify Your ASP.NET Core APIs with Meaningful Responses](http://vmsdurano.com/autowrapper-prettify-your-asp-net-core-apis-with-meaningful-responses/)
 * [AutoWrapper: Customizing the Default Response Output](http://vmsdurano.com/asp-net-core-with-autowrapper-customizing-the-default-response-output/)
