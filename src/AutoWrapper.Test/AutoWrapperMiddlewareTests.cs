@@ -639,5 +639,49 @@ namespace AutoWrapper.Test
             json["errors"]!["type"]!.Value<string>().ShouldBe("InvalidOperationException");
             json.ContainsKey("responseException").ShouldBe(false);
         }
+
+        [Fact(DisplayName = "Unified_UnhandledException_Should_Expose_Internal_Details_When_IsDebug_True")]
+        public async Task Unified_UnhandledException_Should_Expose_Internal_Details_When_IsDebug_True()
+        {
+            var builder = new WebHostBuilder()
+                .ConfigureServices(services => { services.AddMvcCore(); })
+                .Configure(app =>
+                {
+                    app.UseApiResponseAndExceptionWrapper(new AutoWrapperOptions
+                    {
+                        ErrorOutputMode = ErrorOutputMode.Unified,
+                        ShowStatusCode = true,
+                        ShowIsErrorFlagForSuccessfulResponse = true,
+                        IgnoreNullValue = false,
+                        IsDebug = true
+                    });
+
+                    app.Run(context =>
+                    {
+                        var zero = 0;
+                        var result = 10 / zero;
+                        return context.Response.WriteAsync(result.ToString());
+                    });
+                });
+
+            var server = new TestServer(builder);
+            var rep = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Get, ""));
+            var content = await rep.Content.ReadAsStringAsync();
+
+            var json = JObject.Parse(content);
+
+            Convert.ToInt32(rep.StatusCode).ShouldBe(500);
+            json["statusCode"]!.Value<int>().ShouldBe(500);
+            json["isError"]!.Value<bool>().ShouldBe(true);
+            json["message"]!.Value<string>().ShouldBe("Attempted to divide by zero.");
+            json["result"]!.Type.ShouldBe(JTokenType.Null);
+
+            var details = json["errors"]!["details"]!.Value<string>();
+
+            details.ShouldNotBeNullOrWhiteSpace();
+            details.ShouldContain(nameof(AutoWrapperMiddlewareTests));
+
+            json.ContainsKey("responseException").ShouldBe(false);
+        }
     }
 }

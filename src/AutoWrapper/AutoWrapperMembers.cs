@@ -116,7 +116,7 @@ namespace AutoWrapper
 
                 if (_options.IsDebug)
                 {
-                    exceptionMessage = $"{ exceptionMessage } { exception.GetBaseException().Message }";
+                    exceptionMessage = exception.GetBaseException().Message;
                     stackTrace = exception.StackTrace;
                 }
                 else
@@ -394,12 +394,29 @@ namespace AutoWrapper
 
         private object BuildReferenceErrorObject(ApiError apiError)
         {
-            if (string.IsNullOrEmpty(apiError.ReferenceErrorCode) && string.IsNullOrEmpty(apiError.ReferenceDocumentLink))
+            if (apiError == null)
             {
                 return null;
             }
 
-            return new { code = apiError.ReferenceErrorCode, link = apiError.ReferenceDocumentLink };
+            var details = new Dictionary<string, object>();
+
+            if (!string.IsNullOrWhiteSpace(apiError.ReferenceErrorCode))
+            {
+                details["code"] = apiError.ReferenceErrorCode;
+            }
+
+            if (!string.IsNullOrWhiteSpace(apiError.ReferenceDocumentLink))
+            {
+                details["link"] = apiError.ReferenceDocumentLink;
+            }
+
+            if (!string.IsNullOrWhiteSpace(apiError.Details))
+            {
+                details["details"] = apiError.Details;
+            }
+
+            return details.Count == 0 ? null : details;
         }
 
         private (string Message, object Errors) ParseControlledErrorBody(object body, int httpStatusCode)
